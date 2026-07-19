@@ -273,15 +273,16 @@ class LLMConverter:
         evict = None
         load = None
         ev_ld_cnt = 0
-        for i in range(2):
-            if 'kv_load' in layers[i].name:
+        for i in range(min(2, len(layers))):
+            layer_name = layers[i].name.lower()
+            if 'kv_load' in layer_name or 'kv_reload_cpu' in layer_name:
                 load = self.get_memory_load_node(
                             layers[i].name,
                             "WEIGHT",
                             layers[i].weight_memory_loc,
                             layers[i].weight_memory_size, # already per npu kv_cache size
                         )
-            elif 'kv_evict' in layers[i].name:
+            elif 'kv_evict' in layer_name:
                 evict = self.get_memory_store_node(
                             layers[i].name,
                             "WEIGHT",
@@ -294,6 +295,17 @@ class LLMConverter:
             
         layers = layers[ev_ld_cnt:]
         num_layers -= ev_ld_cnt
+
+        if num_layers == 0 and (evict is not None or load is not None):
+            for npu_id in range(self.npu_offset, self.npu_offset + self.num_npus):
+                output_filename = "%s.%d.et" % (self.output_filename, npu_id)
+                with open(output_filename, "wb") as g:
+                    encode_message(g, self.get_global_metadata())
+                    if evict is not None:
+                        encode_message(g, evict)
+                    if load is not None:
+                        encode_message(g, load)
+            return
 
         if self.num_npus % num_npu_group != 0: print("Warning! num_npus % num_npu_group != 0, Some npus won't do anything!")
         npus_per_group = self.num_npus // num_npu_group
@@ -598,15 +610,16 @@ class LLMConverter:
         evict = None
         load = None
         ev_ld_cnt = 0
-        for i in range(2):
-            if 'kv_load' in layers[i].name:
+        for i in range(min(2, len(layers))):
+            layer_name = layers[i].name.lower()
+            if 'kv_load' in layer_name or 'kv_reload_cpu' in layer_name:
                 load = self.get_memory_load_node(
                             layers[i].name,
                             "WEIGHT",
                             layers[i].weight_memory_loc,
                             layers[i].weight_memory_size, # already per npu kv_cache size
                         )
-            elif 'kv_evict' in layers[i].name:
+            elif 'kv_evict' in layer_name:
                 evict = self.get_memory_store_node(
                             layers[i].name,
                             "WEIGHT",
