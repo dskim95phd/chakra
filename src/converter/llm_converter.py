@@ -633,6 +633,26 @@ class LLMConverter:
         layers = layers[ev_ld_cnt:]
         num_layers -= ev_ld_cnt
 
+        if num_layers == 0 and (evict is not None or load is not None):
+            for npu_id in range(self.npu_offset, self.npu_offset + self.num_npus):
+                output_filename1 = "%s.%d.et" % (self.output_filename, npu_id)
+                output_filename2 = "%s.%d.et" % (
+                    self.output_filename, npu_id + self.num_npus)
+                with open(output_filename1, "wb") as g, open(output_filename2, "wb") as s:
+                    global_metadata = self.get_global_metadata()
+                    encode_message(g, global_metadata)
+                    encode_message(s, global_metadata)
+                    if evict is not None:
+                        encode_message(g, evict)
+                    if load is not None:
+                        encode_message(g, load)
+                    # The paired sender does not perform the host transfer, but
+                    # it must finish this workload before the next prefill can
+                    # start. Keep it earlier than the physical NPU transfer.
+                    encode_message(
+                        s, self.get_comp_node("kv_migration_sync", 1))
+            return
+
         if self.num_npus % num_npu_group != 0: print("Warning! num_npus % num_npu_group != 0, Some npus won't do anything!")
         npus_per_group = self.num_npus // num_npu_group
         if npus_per_group == 1: # same as pipeline parallelism, ignore all reduce
