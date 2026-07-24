@@ -266,6 +266,45 @@ class LLMConverter:
     def add_parent(self, child_node: Any, parent_node: Any) -> None:
         child_node.data_deps.append(parent_node.id)
 
+    def get_pipeline_partition_ends(
+        self, layers: list[Layer], num_npu_group: int
+    ) -> list[int]:
+        """Choose balanced PP cuts whose SEND and RECV tensor sizes match."""
+
+        if num_npu_group < 1 or len(layers) < num_npu_group:
+            raise ValueError(
+                "Pipeline parallel degree exceeds the available trace layers"
+            )
+
+        safe_cuts = []
+        for index in range(1, len(layers)):
+            previous = layers[index - 1]
+            following = layers[index]
+            if (previous.is_expert or previous.is_pim or
+                    following.is_expert or following.is_pim):
+                continue
+            if previous.output_memory_size == following.input_memory_size:
+                safe_cuts.append(index)
+
+        ends = [0]
+        for group_index in range(1, num_npu_group):
+            lower = ends[-1] + 1
+            upper = len(layers) - (num_npu_group - group_index)
+            candidates = [
+                index for index in safe_cuts
+                if lower <= index <= upper
+            ]
+            if not candidates:
+                raise ValueError(
+                    "No tensor-compatible pipeline boundary is available "
+                    f"for stage {group_index}"
+                )
+            target = round(len(layers) * group_index / num_npu_group)
+            ends.append(min(candidates, key=lambda index: (
+                abs(index - target), index)))
+        ends.append(len(layers))
+        return ends
+
     def convert_common(self, f: TextIOWrapper, num_layers: int, num_npu_group: int):
         layers: list[Layer] = self.get_layers(f)
 
@@ -313,17 +352,12 @@ class LLMConverter:
             use_comm = False
         else:
             use_comm = True
-        layers_per_group = num_layers // num_npu_group
-        remain_layers = num_layers % num_npu_group
-
-        layer_start = 0
-        layer_end = 0
+        partition_ends = self.get_pipeline_partition_ends(
+            layers, num_npu_group)
 
         for npu_group in range(num_npu_group):
-            layer_start = layer_end
-            layer_end = layer_start + layers_per_group + (1 if remain_layers > 0 else 0)
-            if layer_end >= num_layers:
-                layer_end = num_layers
+            layer_start = partition_ends[npu_group]
+            layer_end = partition_ends[npu_group + 1]
             for npu_offset in range(npus_per_group):
                 npu_id = npu_group * npus_per_group + npu_offset + self.npu_offset
                 output_filename = "%s.%d.et" % (self.output_filename, npu_id)
@@ -600,7 +634,6 @@ class LLMConverter:
                         else:
                             self.add_parent(send_output_node, layers[layer_end - 2].comp_node)
                         encode_message(g, send_output_node)
-            remain_layers -= 1
     
     def convert_prefill(self, f: TextIOWrapper, num_layers: int, num_npu_group: int):
         layers: list[Layer] = self.get_layers(f)
@@ -659,17 +692,12 @@ class LLMConverter:
             use_comm = False
         else:
             use_comm = True
-        layers_per_group = num_layers // num_npu_group
-        remain_layers = num_layers % num_npu_group
-
-        layer_start = 0
-        layer_end = 0
+        partition_ends = self.get_pipeline_partition_ends(
+            layers, num_npu_group)
 
         for npu_group in range(num_npu_group):
-            layer_start = layer_end
-            layer_end = layer_start + layers_per_group + (1 if remain_layers > 0 else 0)
-            if layer_end >= num_layers:
-                layer_end = num_layers
+            layer_start = partition_ends[npu_group]
+            layer_end = partition_ends[npu_group + 1]
             for npu_offset in range(npus_per_group):
                 npu_id = npu_group * npus_per_group + npu_offset + self.npu_offset
                 output_filename1 = "%s.%d.et" % (self.output_filename, npu_id)
@@ -891,7 +919,6 @@ class LLMConverter:
                         else:
                             self.add_parent(send_output_node, layers[layer_end - 2].comp_node)
                         encode_message(g, send_output_node)
-            remain_layers -= 1
 
     def convert_event(self, f: TextIOWrapper, num_layers: int):
         layers: list[Layer] = self.get_layers(f)
